@@ -21,6 +21,13 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
+# Some Windows/dev shells expose DEBUG=release. Pydantic expects DEBUG to be a
+# boolean, so keep explicit boolean values and neutralize unrelated ones.
+if ($env:DEBUG -and $env:DEBUG -notmatch '^(true|false|1|0|yes|no|on|off)$') {
+    Write-Host ("Ignoring non-boolean DEBUG={0} for Odysseus startup." -f $env:DEBUG) -ForegroundColor Yellow
+    $env:DEBUG = "false"
+}
+
 function Write-Step($msg) { Write-Host ""; Write-Host ("==> " + $msg) -ForegroundColor Cyan }
 function Fail($msg) {
     Write-Host ""

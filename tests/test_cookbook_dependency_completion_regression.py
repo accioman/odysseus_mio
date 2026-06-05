@@ -33,8 +33,9 @@ def test_local_windows_session_commands_use_local_powershell_log_dir():
 
     assert "const host = task.remoteHost;" in source
     assert "host ? '$env:TEMP\\\\odysseus-sessions' : '$env:TEMP\\\\odysseus-tmux'" in source
-    assert "return host ? `ssh ${pf}${host}" in source
-    assert ": `powershell -Command \"${ps}\"`;" in source
+    assert "function _psEncodedCommand(script) {" in source
+    assert "powershell -NoProfile -EncodedCommand ${_psEncodedCommand(script)}" in source
+    assert "return host ? `ssh ${pf}${host} ${cmd}` : cmd;" in source
 
 
 def test_dep_install_success_recognized_from_exit_sentinel():
@@ -75,6 +76,25 @@ def test_background_poll_recovers_done_for_stopped_dependency_install():
 
     assert "const depDone = !!task.payload?._dep && _depInstallSucceeded(task.output);" in source
     assert "depDone ? 'done' : (task.type === 'download' ? 'crashed' : 'stopped')" in source
+
+
+def test_download_retry_uses_saved_download_dir_when_payload_is_stale():
+    route_source = _read("routes/cookbook_routes.py")
+    js_source = _read("static/js/cookbookRunning.js")
+
+    assert "def _configured_download_dir(remote_host: str | None) -> str:" in route_source
+    assert "req.local_dir = req.local_dir or _configured_download_dir(req.remote_host)" in route_source
+    assert '"local_dir": req.local_dir or ""' in route_source
+    assert "if (data.local_dir && !_payload.local_dir) _payload.local_dir = data.local_dir;" in js_source
+
+
+def test_state_post_rejects_stale_terminal_status_for_live_local_downloads():
+    source = _read("routes/cookbook_routes.py")
+
+    assert "rejecting stale terminal status for live local download" in source
+    assert '_it.get("status") not in {"error", "crashed", "stopped"}' in source
+    assert "pid_alive(_pid)" in source
+    assert '_it["status"] = "running"' in source
 
 
 def test_dependency_install_payload_keeps_env_path_for_refresh():

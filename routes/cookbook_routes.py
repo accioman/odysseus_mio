@@ -121,6 +121,27 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception:
             return ""
 
+    def _configured_download_dir(remote_host: str | None) -> str:
+        """Return the saved Cookbook download target for a host, if any."""
+        if not _cookbook_state_path.exists():
+            return ""
+        try:
+            state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
+            env = state.get("env") if isinstance(state, dict) else {}
+            servers = env.get("servers") if isinstance(env, dict) else []
+            if not isinstance(servers, list):
+                return ""
+            wanted = remote_host or ""
+            for srv in servers:
+                if not isinstance(srv, dict):
+                    continue
+                host = srv.get("host") or ""
+                if (host or "") == wanted or (not wanted and host in ("", "local")):
+                    return srv.get("downloadDir") or ""
+        except Exception:
+            return ""
+        return ""
+
     def _cookbook_ssh_dir() -> Path:
         # The Docker image keeps cookbook keys under /app/.ssh; that path only
         # exists inside the container. On Windows (and any non-container host)
@@ -281,6 +302,7 @@ def setup_cookbook_routes() -> APIRouter:
         _validate_include(req.include)
         _validate_remote_host(req.remote_host)
         req.ssh_port = _validate_ssh_port(req.ssh_port)
+        req.local_dir = req.local_dir or _configured_download_dir(req.remote_host)
         req.local_dir = _validate_local_dir(req.local_dir)
         req.hf_token = req.hf_token or _load_stored_hf_token()
         _validate_token(req.hf_token)
@@ -534,7 +556,7 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception:
             pass
 
-        return {"ok": True, "session_id": session_id, "remote": remote or "local"}
+        return {"ok": True, "session_id": session_id, "remote": remote or "local", "local_dir": req.local_dir or ""}
 
     @router.get("/api/model/cached")
     async def model_cached(request: Request, host: str | None = None, model_dir: str | None = None, ssh_port: str | None = None, platform: str | None = None):
@@ -1750,6 +1772,28 @@ def setup_cookbook_routes() -> APIRouter:
                         logger.info(f"cookbook state POST: rejecting stale done for {_it.get('sessionId')} "
                                     f"({_completed}/{_starts} files complete, no DOWNLOAD_OK)")
                         _it["status"] = "running"
+            # Local Windows downloads are detached processes with a pid/log
+            # file, not tmux sessions. A stale browser tab can still POST a
+            # terminal status after the backend has successfully relaunched a
+            # retry; if the pid file proves the runner is alive, keep it
+            # running instead of letting the UI poison cookbook_state.json.
+            for _it in incoming_tasks:
+                if (not isinstance(_it, dict)) or _it.get("type") != "download":
+                    continue
+                if _it.get("status") not in {"error", "crashed", "stopped"}:
+                    continue
+                if _it.get("remoteHost"):
+                    continue
+                _sid = _it.get("sessionId") or ""
+                if not _SESSION_ID_RE.match(str(_sid)):
+                    continue
+                try:
+                    _pid = int((TMUX_LOG_DIR / f"{_sid}.pid").read_text(encoding="utf-8").strip())
+                except Exception:
+                    _pid = None
+                if pid_alive(_pid):
+                    logger.info(f"cookbook state POST: rejecting stale terminal status for live local download {_sid}")
+                    _it["status"] = "running"
             incoming_ids = {t.get("sessionId") for t in incoming_tasks if isinstance(t, dict) and t.get("sessionId")}
             import time as _t
             now_ms = int(_t.time() * 1000)
@@ -2049,6 +2093,113 @@ def setup_cookbook_routes() -> APIRouter:
         asyncio.to_thread so other requests stay responsive."""
         require_admin(request)
         return await asyncio.to_thread(_cookbook_tasks_status_sync)
+
+    def _load_cookbook_task(session_id: str) -> dict | None:
+        if not _cookbook_state_path.exists():
+            return None
+        try:
+            state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
+            saved_tasks = state.get("tasks", [])
+            if isinstance(saved_tasks, dict):
+                saved_tasks = list(saved_tasks.values())
+            if not isinstance(saved_tasks, list):
+                return None
+            for task in saved_tasks:
+                if isinstance(task, dict) and task.get("sessionId") == session_id:
+                    return task
+        except Exception:
+            return None
+        return None
+
+    def _read_local_task_log_tail(session_id: str, lines: int) -> str:
+        try:
+            log_path = TMUX_LOG_DIR / f"{session_id}.log"
+            if not log_path.exists():
+                return ""
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            return "\n".join(text.splitlines()[-lines:]).rstrip()
+        except Exception:
+            return ""
+
+    def _tail_task_log_sync(session_id: str, lines: int) -> dict:
+        """Return a live tail for a known Cookbook task.
+
+        The Running tab's cached output can be empty when a tmux/log session
+        dies before the browser captures its final pane. This probes the
+        authoritative source directly: local Windows log files, remote Windows
+        log files, or tmux capture-pane for POSIX hosts.
+        """
+        task = _load_cookbook_task(session_id) or {}
+        remote = (task.get("remoteHost") or "").strip()
+        ssh_port = str(task.get("sshPort") or "").strip()
+        platform = str(task.get("platform") or "").strip().lower()
+
+        if remote and not _REMOTE_HOST_RE.match(remote):
+            return {"ok": False, "output": "", "error": "Invalid task host"}
+        if ssh_port and not _SSH_PORT_RE.match(ssh_port):
+            return {"ok": False, "output": "", "error": "Invalid task ssh_port"}
+
+        if not task:
+            local_tail = _read_local_task_log_tail(session_id, lines)
+            if local_tail:
+                return {"ok": True, "output": local_tail, "source": "local-log"}
+            return {"ok": False, "output": "", "error": "Task not found"}
+
+        if not remote and IS_WINDOWS:
+            output = _read_local_task_log_tail(session_id, lines)
+            return {
+                "ok": bool(output),
+                "output": output,
+                "source": "local-log",
+                "error": "" if output else "No local log found",
+            }
+
+        try:
+            if remote:
+                ssh_base = ["ssh"]
+                if ssh_port and ssh_port != "22":
+                    ssh_base.extend(["-p", ssh_port])
+                if platform == "windows":
+                    ps = (
+                        "$sd = Join-Path $env:TEMP 'odysseus-sessions'; "
+                        f"Get-Content -LiteralPath (Join-Path $sd '{session_id}.log') "
+                        f"-Tail {lines} -ErrorAction SilentlyContinue"
+                    )
+                    cmd = ssh_base + [remote, "powershell", "-NoProfile", "-Command", ps]
+                    source = "remote-windows-log"
+                else:
+                    cmd = ssh_base + [
+                        remote,
+                        "tmux", "capture-pane", "-t", session_id, "-p", "-S", f"-{lines}",
+                    ]
+                    source = "remote-tmux"
+            else:
+                cmd = ["tmux", "capture-pane", "-t", session_id, "-p", "-S", f"-{lines}"]
+                source = "local-tmux"
+
+            proc = subprocess.run(cmd, timeout=12, capture_output=True, text=True)
+            output = (proc.stdout or "").rstrip()
+            if proc.returncode == 0 and output:
+                return {"ok": True, "output": output, "source": source}
+            fallback = _read_local_task_log_tail(session_id, lines)
+            if fallback:
+                return {"ok": True, "output": fallback, "source": "local-log"}
+            err = (proc.stderr or "").strip()[:300]
+            return {"ok": False, "output": output, "source": source, "error": err or "No log output"}
+        except Exception as e:
+            fallback = _read_local_task_log_tail(session_id, lines)
+            if fallback:
+                return {"ok": True, "output": fallback, "source": "local-log"}
+            return {"ok": False, "output": "", "error": str(e)[:300]}
+
+    @router.get("/api/cookbook/tasks/{session_id}/log")
+    async def cookbook_task_log(request: Request, session_id: str, lines: int = 50):
+        """Tail a Cookbook task's authoritative tmux/log output."""
+        require_admin(request)
+        if not _SESSION_ID_RE.match(session_id):
+            raise HTTPException(400, "Invalid session_id")
+        lines = max(1, min(int(lines or 50), 500))
+        return await asyncio.to_thread(_tail_task_log_sync, session_id, lines)
 
     def _cookbook_tasks_status_sync():
         import subprocess

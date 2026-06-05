@@ -198,6 +198,37 @@ function _lastLines(text, count = 160) {
   return clean.split('\n').slice(-count).join('\n');
 }
 
+async function _fetchTaskLogTail(task, count = 50) {
+  const sid = task?.sessionId || task?.id || '';
+  if (!sid || String(sid).startsWith('queue-')) return '';
+  try {
+    const res = await fetch(`/api/cookbook/tasks/${encodeURIComponent(sid)}/log?lines=${encodeURIComponent(count)}`, {
+      credentials: 'same-origin',
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    return data?.ok && data.output ? String(data.output) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function _copyTaskLogTail(el, task, fallbackText = '', count = 50) {
+  const fetched = await _fetchTaskLogTail(task, count);
+  if (fetched && task?.sessionId) {
+    _updateTask(task.sessionId, { output: fetched.slice(-5000) });
+  }
+  const cached = fallbackText
+    || el?.querySelector?.('.cookbook-output-pre')?.textContent
+    || task?.output
+    || '';
+  const text = fetched || cached;
+  const last = String(text || '').split('\n').slice(-count).join('\n').trim();
+  await _copyText(last
+    ? _redactCrashReportText(last)
+    : 'No captured download log. Reconnect or retry, then copy the log again.');
+}
+
 function _codeFence(text) {
   return String(text || '').replace(/```/g, '` ` `');
 }
@@ -772,6 +803,23 @@ export function _tmuxCmd(task, tmuxArgs) {
   return `tmux ${tmuxArgs} 2>/dev/null`;
 }
 
+function _psEncodedCommand(script) {
+  // PowerShell expects UTF-16LE bytes for -EncodedCommand. Building the byte
+  // string manually keeps `$env:*` intact when /api/shell/exec runs via Git Bash.
+  let bytes = '';
+  const text = String(script || '');
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    bytes += String.fromCharCode(code & 0xff, (code >> 8) & 0xff);
+  }
+  return btoa(bytes);
+}
+
+function _winPowerShellCmd(host, pf, script) {
+  const cmd = `powershell -NoProfile -EncodedCommand ${_psEncodedCommand(script)}`;
+  return host ? `ssh ${pf}${host} ${cmd}` : cmd;
+}
+
 function _winSessionCmd(task, tmuxArgs) {
   const host = task.remoteHost;
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
@@ -782,25 +830,25 @@ function _winSessionCmd(task, tmuxArgs) {
     const ps = host
       ? `Get-Content '${sd}\\${sid}.log' -Tail ${lines} -ErrorAction SilentlyContinue`
       : `Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.log') -Tail ${lines} -ErrorAction SilentlyContinue`;
-    return host ? `ssh ${pf}${host} "powershell -Command \\"${ps}\\""` : `powershell -Command "${ps}"`;
+    return _winPowerShellCmd(host, pf, ps);
   }
   if (tmuxArgs.includes('has-session')) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }`
       : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }`;
-    return host ? `ssh ${pf}${host} "powershell -Command \\"${ps}\\""` : `powershell -Command "${ps}"`;
+    return _winPowerShellCmd(host, pf, ps);
   }
   if (tmuxArgs.includes('kill-session')) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
       : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
-    return host ? `ssh ${pf}${host} "powershell -Command \\"${ps}\\""` : `powershell -Command "${ps}"`;
+    return _winPowerShellCmd(host, pf, ps);
   }
   if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -ErrorAction SilentlyContinue }`
       : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -ErrorAction SilentlyContinue }`;
-    return host ? `ssh ${pf}${host} "powershell -Command \\"${ps}\\""` : `powershell -Command "${ps}"`;
+    return _winPowerShellCmd(host, pf, ps);
   }
   return host ? `ssh ${pf}${host} 'tmux ${tmuxArgs}' 2>/dev/null` : `tmux ${tmuxArgs} 2>/dev/null`;
 }
@@ -814,7 +862,7 @@ function _tmuxGracefulKill(task) {
     const ps = host
       ? `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
       : `$p = Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.pid') -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item (Join-Path $env:TEMP 'odysseus-tmux\\${sid}.*') -Force -ErrorAction SilentlyContinue`;
-    return host ? `ssh ${pf}${host} "powershell -Command \\"${ps}\\""` : `powershell -Command "${ps}"`;
+    return _winPowerShellCmd(host, pf, ps);
   }
   if (task.remoteHost) {
     return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} 'tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
@@ -1164,6 +1212,7 @@ async function _retryDownload(name, payload, replaceSessionId = '') {
       if (replaceSessionId) _updateTask(replaceSessionId, { status: 'crashed', _retrying: false });
       return;
     }
+    if (data.local_dir && !_payload.local_dir) _payload.local_dir = data.local_dir;
     if (replaceSessionId) {
       const tasks = _loadTasks();
       const task = tasks.find(t => t.sessionId === replaceSessionId);
@@ -2177,9 +2226,10 @@ export function _renderRunningTab() {
         if (_isWindows(task)) {
           const host = task.remoteHost;
           const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
-          const logCmd = host
-            ? `ssh ${_sshPrefix(_getPort(task))}${host} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`
-            : `powershell -Command "Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${task.sessionId}.log') -Wait"`;
+          const ps = host
+            ? `Get-Content '${sd}\\${task.sessionId}.log' -Wait`
+            : `Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${task.sessionId}.log') -Wait`;
+          const logCmd = _winPowerShellCmd(host, _sshPrefix(_getPort(task)), ps);
           items.push({ label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);
           }});
@@ -2198,10 +2248,9 @@ export function _renderRunningTab() {
           }});
         }
         // Copy the last 50 lines of the task's output/log.
-        items.push({ label: 'Copy last 50 lines', action: 'copy-log', custom: () => {
+        items.push({ label: 'Copy last 50 lines', action: 'copy-log', custom: async () => {
           const out = (el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
-          const last = out.split('\n').slice(-50).join('\n');
-          _copyText(last);
+          await _copyTaskLogTail(el, task, out, 50);
           uiModule.showToast('Copied last 50 lines');
         }});
         // Label matches behavior — the kill handler ALWAYS first kills
@@ -2652,18 +2701,12 @@ async function _reconnectTask(el, task) {
                 fixes: isDisk
                   ? [
                       { label: 'Retry download', action: () => _retryTask(el, task) },
-                      { label: 'Copy last 50 lines', action: () => {
-                        const last = String(lastOutput || '').split('\n').slice(-50).join('\n');
-                        _copyText(last || 'No download log available.');
-                      } },
+                      { label: 'Copy last 50 lines', action: () => _copyTaskLogTail(el, task, lastOutput, 50) },
                     ]
                   : [
                       _reconnectFix,
                       { label: 'Retry download', action: () => _retryTask(el, task) },
-                      { label: 'Copy last 50 lines', action: () => {
-                        const last = String(lastOutput || '').split('\n').slice(-50).join('\n');
-                        _copyText(last || 'No download log available.');
-                      } },
+                      { label: 'Copy last 50 lines', action: () => _copyTaskLogTail(el, task, lastOutput, 50) },
                     ],
               };
               _showDiagnosis(el, diag, lastOutput);

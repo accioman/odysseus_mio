@@ -20,6 +20,7 @@ from routes.cookbook_helpers import (
     _user_shell_path_bootstrap,
     _venv_safe_local_pip_install_cmd,
     _validate_gpus,
+    _validate_local_dir,
     _validate_repo_id,
     _validate_serve_cmd,
     _validate_serve_model_id,
@@ -61,6 +62,15 @@ def test_validate_gpus_accepts_indexes_only():
     assert _validate_gpus("0,1,2") == "0,1,2"
     with pytest.raises(HTTPException):
         _validate_gpus("0; rm -rf /")
+
+
+def test_validate_local_dir_accepts_windows_drive_paths():
+    assert _validate_local_dir(r"D:\Personale") == "D:/Personale"
+    assert _validate_local_dir("D:/Personale/models") == "D:/Personale/models"
+    with pytest.raises(HTTPException):
+        _validate_local_dir("D:relative")
+    with pytest.raises(HTTPException):
+        _validate_local_dir(r"D:\Personale & del")
 
 
 def test_validate_repo_id_stays_strict_for_hf_downloads():

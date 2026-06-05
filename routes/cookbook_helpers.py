@@ -38,10 +38,12 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SSH_PORT_RE = re.compile(r"^\d{1,5}$")
 _GPU_LIST_RE = re.compile(r"^\d+(?:,\d+)*$")
-# A download target directory. Absolute or ~-relative path; safe path glyphs
-# only (no quotes, shell metacharacters, or spaces) since it lands in a shell
-# command. A leading ~ is expanded to $HOME at command-build time.
-_LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/-]*$|^~$")
+# A download target directory. Absolute POSIX, ~-relative, or Windows drive
+# path; safe path glyphs only (no quotes, shell metacharacters, or spaces)
+# since it lands in a shell command. A leading ~ is expanded to $HOME at
+# command-build time. Windows paths are normalized to forward slashes by the
+# validator so Git Bash hands them to Windows Python/HF without backslash loss.
+_LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/-]*$|^~$|^[A-Za-z]:/[A-Za-z0-9._/-]*$")
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -94,6 +96,7 @@ def _validate_token(v: str | None) -> str | None:
 def _validate_local_dir(v: str | None) -> str | None:
     if v is None or v == "":
         return None
+    v = v.replace("\\", "/")
     v = v.rstrip("/") or "/"
     if not _LOCAL_DIR_RE.match(v):
         raise HTTPException(400, "Invalid local_dir — must be an absolute or ~ path with no spaces or shell metacharacters")
