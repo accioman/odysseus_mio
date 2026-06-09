@@ -7,6 +7,7 @@ import os
 import posixpath
 import re
 import shlex
+import sys
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -267,7 +268,17 @@ def _venv_safe_local_pip_install_cmd(cmd: str, *, local: bool, in_venv: bool) ->
 
 
 def _user_shell_path_bootstrap() -> list[str]:
+    default_python = os.environ.get("ODYSSEUS_PYTHON") or sys.executable
     return [
+        f'ODYSSEUS_PYTHON_BIN={shlex.quote(default_python)}',
+        'if [ -n "${ODYSSEUS_PYTHON:-}" ]; then ODYSSEUS_PYTHON_BIN="$ODYSSEUS_PYTHON"; fi',
+        'if [ -n "$ODYSSEUS_PYTHON_BIN" ]; then',
+        '  if command -v cygpath >/dev/null 2>&1; then ODYSSEUS_PYTHON_BIN="$(cygpath -u "$ODYSSEUS_PYTHON_BIN" 2>/dev/null || printf %s "$ODYSSEUS_PYTHON_BIN")"; fi',
+        '  if [ -x "$ODYSSEUS_PYTHON_BIN" ]; then',
+        '    python() { "$ODYSSEUS_PYTHON_BIN" "$@"; }',
+        '    python3() { "$ODYSSEUS_PYTHON_BIN" "$@"; }',
+        '  fi',
+        'fi',
         'ODYSSEUS_USER_SHELL="${SHELL:-}"',
         'if [ -n "$ODYSSEUS_USER_SHELL" ] && [ -x "$ODYSSEUS_USER_SHELL" ]; then',
         '  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"',

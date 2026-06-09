@@ -6,12 +6,61 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$DepsRoot = $env:ODYSSEUS_DEPS_ROOT
+if (-not $DepsRoot) { $DepsRoot = "D:\Personale\deps" }
+$DepsRoot = [System.IO.Path]::GetFullPath($DepsRoot)
+$ProjectDeps = Join-Path $DepsRoot "odysseus"
+$VenvDir = Join-Path $ProjectDeps "venv"
 $Port = 7000
 $Url = "http://127.0.0.1:$Port"
-$Python = Join-Path $ProjectRoot "venv\Scripts\python.exe"
+$Python = Join-Path $VenvDir "Scripts\python.exe"
 $LogDir = Join-Path $ProjectRoot "logs"
 $StdoutLog = Join-Path $LogDir "odysseus-shortcut.out.log"
 $StderrLog = Join-Path $LogDir "odysseus-shortcut.err.log"
+
+function Set-DependencyEnvironment {
+  $paths = @{
+    "PIP_CACHE_DIR" = Join-Path $DepsRoot "pip-cache"
+    "PYTHONUSERBASE" = Join-Path $DepsRoot "python-user"
+    "HF_HOME" = Join-Path $DepsRoot "huggingface"
+    "HUGGINGFACE_HUB_CACHE" = Join-Path $DepsRoot "huggingface\hub"
+    "FASTEMBED_CACHE_PATH" = Join-Path $DepsRoot "fastembed"
+    "PLAYWRIGHT_BROWSERS_PATH" = Join-Path $DepsRoot "playwright-browsers"
+    "TORCH_HOME" = Join-Path $DepsRoot "torch"
+    "XDG_CACHE_HOME" = Join-Path $DepsRoot "xdg-cache"
+    "NPM_CONFIG_CACHE" = Join-Path $DepsRoot "npm-cache"
+    "TEMP" = Join-Path $DepsRoot "tmp"
+    "TMP" = Join-Path $DepsRoot "tmp"
+    "TMPDIR" = Join-Path $DepsRoot "tmp"
+  }
+  New-Item -ItemType Directory -Force -Path $ProjectDeps | Out-Null
+  foreach ($p in $paths.Values) {
+    New-Item -ItemType Directory -Force -Path $p | Out-Null
+  }
+  $env:ODYSSEUS_DEPS_ROOT = $DepsRoot
+  foreach ($entry in $paths.GetEnumerator()) {
+    Set-Item -Path ("Env:" + $entry.Key) -Value $entry.Value
+  }
+  $env:npm_config_cache = $env:NPM_CONFIG_CACHE
+  $env:HF_HUB_DISABLE_SYMLINKS = "1"
+  $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
+  $env:VIRTUAL_ENV = $VenvDir
+  $env:ODYSSEUS_PYTHON = $Python
+  $scriptsDir = Join-Path $VenvDir "Scripts"
+  $userScriptsDir = Join-Path $env:PYTHONUSERBASE "Scripts"
+  $prepend = @($scriptsDir, $userScriptsDir) | Where-Object { $_ }
+  $current = @()
+  if ($env:PATH) { $current = $env:PATH -split ";" }
+  $prependReverse = @($prepend)
+  [array]::Reverse($prependReverse)
+  foreach ($p in $prependReverse) {
+    if ($current -notcontains $p) {
+      $env:PATH = "$p;$env:PATH"
+    }
+  }
+}
+
+Set-DependencyEnvironment
 
 function Test-OdysseusListening {
   try {

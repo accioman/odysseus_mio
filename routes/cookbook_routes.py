@@ -265,17 +265,53 @@ def setup_cookbook_routes() -> APIRouter:
             )
             argv = [bash, str(script_path)]
         else:
-            # No bash on this Windows host: the bash wrapper can't run. Fall back
-            # to a cmd.exe wrapper that just records a clear error to the log so
-            # the UI surfaces "install Git Bash" instead of silently hanging.
-            script_path = TMUX_LOG_DIR / f"{session_id}.cmd"
-            script_path.write_text(
-                "@echo off\r\n"
-                f'echo Cookbook LOCAL execution on Windows needs Git Bash ^(bash.exe^) on PATH. > "{log_path}" 2>&1\r\n'
-                f'echo Install Git for Windows, then retry. >> "{log_path}"\r\n',
-                encoding="utf-8",
-            )
-            argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
+            pip_line = next((line for line in reversed(bash_lines) if "pip install" in line), "")
+            if pip_line:
+                try:
+                    parts = shlex.split(pip_line, posix=True)
+                except ValueError:
+                    parts = []
+                if len(parts) >= 4 and parts[1:3] == ["-m", "pip"]:
+                    python = os.environ.get("ODYSSEUS_PYTHON") or sys.executable
+
+                    def _ps_literal(value: str) -> str:
+                        return "'" + value.replace("'", "''") + "'"
+
+                    argv_literals = " ".join(_ps_literal(p) for p in parts[1:])
+                    script_path = TMUX_LOG_DIR / f"{session_id}.ps1"
+                    script_path.write_text(
+                        "$ErrorActionPreference = 'Continue'\r\n"
+                        f"& {_ps_literal(python)} {argv_literals} *> {_ps_literal(str(log_path))}\r\n"
+                        "$code = $LASTEXITCODE\r\n"
+                        f'Add-Content -LiteralPath {_ps_literal(str(log_path))} -Value ""\r\n'
+                        f'Add-Content -LiteralPath {_ps_literal(str(log_path))} -Value "=== Process exited with code $code ==="\r\n'
+                        "exit $code\r\n",
+                        encoding="utf-8",
+                    )
+                    argv = [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                    ]
+                else:
+                    argv = None
+            else:
+                argv = None
+            if argv is None:
+                # No bash on this Windows host: the bash wrapper can't run. Fall back
+                # to a cmd.exe wrapper that just records a clear error to the log so
+                # the UI surfaces "install Git Bash" instead of silently hanging.
+                script_path = TMUX_LOG_DIR / f"{session_id}.cmd"
+                script_path.write_text(
+                    "@echo off\r\n"
+                    f'echo Cookbook LOCAL execution on Windows needs Git Bash ^(bash.exe^) on PATH. > "{log_path}" 2>&1\r\n'
+                    f'echo Install Git for Windows, then retry. >> "{log_path}"\r\n',
+                    encoding="utf-8",
+                )
+                argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -878,6 +914,28 @@ def setup_cookbook_routes() -> APIRouter:
             # pip cache so they don't fail mid-build with "No space left" (#1219)
             # and leave the dep installed-but-unusable (#1459).
             req.cmd = _pip_install_no_cache(req.cmd)
+            if IS_WINDOWS and not req.remote_host:
+                raw_pip_spec = req.repo_id or ""
+                pip_base = re.split(r"[\[<>=!~;,]", raw_pip_spec, maxsplit=1)[0].strip().lower()
+                if raw_pip_spec.lower() == "rembg[gpu]":
+                    req.repo_id = "rembg"
+                    try:
+                        parts = shlex.split(req.cmd)
+                    except ValueError:
+                        parts = []
+                    if parts:
+                        parts = ["rembg" if p.lower() == "rembg[gpu]" else p for p in parts]
+                        req.cmd = shlex.join(parts)
+                    else:
+                        req.cmd = req.cmd.replace('"rembg[gpu]"', '"rembg"').replace("rembg[gpu]", "rembg")
+                    raw_pip_spec = req.repo_id
+                    pip_base = "rembg"
+                if pip_base in {"vllm", "sglang"}:
+                    raise HTTPException(
+                        400,
+                        "vLLM/SGLang are not supported for local native-Windows installs. "
+                        "Use Ollama or llama.cpp locally, or install these on a Linux CUDA/ROCm server.",
+                    )
             # PEP-508-style package spec — letters, digits, `.-_` for the
             # name; `[` `]` for extras; `<>=!~,` for version specifiers.
             # v2 review HIGH-14: tightened from the previous regex which

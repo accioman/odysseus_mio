@@ -291,6 +291,9 @@ def test_local_tooling_path_export_converts_windows_paths_for_bash():
 
 def test_user_shell_path_bootstrap_falls_back_to_python_on_windows_bash():
     script = "\n".join(_user_shell_path_bootstrap())
+    assert 'ODYSSEUS_PYTHON_BIN=' in script
+    assert 'if [ -n "${ODYSSEUS_PYTHON:-}" ]; then ODYSSEUS_PYTHON_BIN="$ODYSSEUS_PYTHON"; fi' in script
+    assert 'python3() { "$ODYSSEUS_PYTHON_BIN" "$@"; }' in script
     assert 'command -v python3 >/dev/null 2>&1 || python3() { python "$@"; }' in script
 
 

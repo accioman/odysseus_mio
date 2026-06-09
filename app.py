@@ -1,6 +1,7 @@
 # app.py — slim orchestrator
 import mimetypes
 import os
+import sys
 
 
 def register_static_mime_types() -> None:
@@ -34,6 +35,55 @@ from dotenv import load_dotenv
 # is silently ignored and the user is unexpectedly forced to log in (issue #142).
 # utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
 load_dotenv(encoding="utf-8-sig")
+
+if os.environ.get("DEBUG") and os.environ["DEBUG"].lower() not in {
+    "true", "false", "1", "0", "yes", "no", "on", "off",
+}:
+    os.environ["DEBUG"] = "false"
+
+
+def configure_dependency_paths() -> None:
+    """Route optional dependency caches to ODYSSEUS_DEPS_ROOT when configured."""
+
+    deps_root = os.environ.get("ODYSSEUS_DEPS_ROOT", "").strip()
+    if not deps_root:
+        os.environ.setdefault("ODYSSEUS_PYTHON", sys.executable)
+        return
+
+    deps_root = os.path.abspath(os.path.expanduser(deps_root))
+    defaults = {
+        "PIP_CACHE_DIR": os.path.join(deps_root, "pip-cache"),
+        "PYTHONUSERBASE": os.path.join(deps_root, "python-user"),
+        "HF_HOME": os.path.join(deps_root, "huggingface"),
+        "HUGGINGFACE_HUB_CACHE": os.path.join(deps_root, "huggingface", "hub"),
+        "FASTEMBED_CACHE_PATH": os.path.join(deps_root, "fastembed"),
+        "PLAYWRIGHT_BROWSERS_PATH": os.path.join(deps_root, "playwright-browsers"),
+        "TORCH_HOME": os.path.join(deps_root, "torch"),
+        "XDG_CACHE_HOME": os.path.join(deps_root, "xdg-cache"),
+        "NPM_CONFIG_CACHE": os.path.join(deps_root, "npm-cache"),
+        "TEMP": os.path.join(deps_root, "tmp"),
+        "TMP": os.path.join(deps_root, "tmp"),
+        "TMPDIR": os.path.join(deps_root, "tmp"),
+    }
+    os.environ["ODYSSEUS_DEPS_ROOT"] = deps_root
+    os.environ.setdefault("ODYSSEUS_PYTHON", sys.executable)
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+        try:
+            os.makedirs(os.environ[key], exist_ok=True)
+        except Exception:
+            pass
+
+    user_scripts = os.path.join(
+        os.environ.get("PYTHONUSERBASE", defaults["PYTHONUSERBASE"]),
+        "Scripts" if os.name == "nt" else "bin",
+    )
+    path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+    if user_scripts and user_scripts not in path_parts:
+        os.environ["PATH"] = user_scripts + os.pathsep + os.environ.get("PATH", "")
+
+
+configure_dependency_paths()
 
 import asyncio
 import logging

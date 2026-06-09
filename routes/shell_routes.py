@@ -248,7 +248,11 @@ def _prepend_user_install_bins_to_path() -> None:
         candidates = [os.path.join(site.USER_BASE, "bin")]
     except Exception:
         candidates = []
-    candidates.append(os.path.expanduser("~/.local/bin"))
+    home = os.environ.get("HOME")
+    if home:
+        candidates.append(os.path.join(home, ".local", "bin"))
+    else:
+        candidates.append(os.path.expanduser("~/.local/bin"))
 
     parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     changed = False
@@ -914,7 +918,7 @@ def setup_shell_routes() -> APIRouter:
             {"name": "vllm", "pip": "vllm", "desc": "High-throughput LLM serving engine", "category": "LLM", "target": "remote"},
             # ── Image ── editor + diffusion model serving
             {"name": "diffusers", "pip": "diffusers[torch]", "desc": "Image generation pipelines (SD, Flux) with PyTorch", "category": "Image", "target": "remote"},
-            {"name": "rembg", "pip": "rembg[gpu]", "desc": "AI background removal for image editor", "category": "Image", "target": "local"},
+            {"name": "rembg", "pip": "rembg", "desc": "AI background removal for image editor", "category": "Image", "target": "local"},
             {"name": "realesrgan", "pip": "realesrgan", "desc": "AI denoise + upscale (Real-ESRGAN). Used by editor's Denoise and Upscale tools.", "category": "Image", "target": "local"},
             # ── Tools ──
             {"name": "playwright", "pip": "playwright", "desc": "Browser automation for web tools", "category": "Tools", "target": "local"},
@@ -1041,9 +1045,11 @@ def setup_shell_routes() -> APIRouter:
         pip_name = body.get("pip")
         if not pip_name:
             return {"ok": False, "error": "No package specified"}
+        if IS_WINDOWS and pip_name == "rembg[gpu]":
+            pip_name = "rembg"
         # Validate against known packages to prevent arbitrary pip install
         known = {
-            "rembg[gpu]", "hf_transfer", "llama-cpp-python[server]", "sglang[all]", "diffusers", "diffusers[torch]",
+            "rembg", "rembg[gpu]", "hf_transfer", "llama-cpp-python[server]", "sglang[all]", "diffusers", "diffusers[torch]",
             "TTS", "bark", "faster-whisper", "playwright", "realesrgan", "gfpgan",
             "insightface", "onnxruntime-gpu", "onnxruntime", "hdbscan", "vllm",
         }
